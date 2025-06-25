@@ -1,57 +1,62 @@
 import datetime
+import db
 
 
-def get_history_srt(history_state: int, user_dict: dict) -> (str, int):
-    res_text = ''
-    if len(user_dict) == 0:
-        return (res_text, history_state)
-    for i in range(10 * history_state, min(10 * (history_state + 1), len(user_dict))):
-        tmp = user_dict[i]
-        tmp_list = tmp['payer'].copy()
-        for j in range(len(tmp['payer'])):
-            if tmp['payer'][j] == tmp['buyer'] or tmp['status'][j] == 1:
-                tmp_list.remove(tmp['payer'][j])
-        res_text += (tmp['name'] + ' - ' + str(tmp['price']) + 'руб. - платят: ' + ', '.join(
-            tmp['payer']) + ' - нужно оплатить: ' + ', '.join(
-            tmp_list) + ' - кому: ' + tmp['buyer'] + '\n')
-    res_text += ('С ' + str(10 * history_state + 1) + ' по ' + str(
-        min(10 * (history_state + 1), len(user_dict))) + ' записи из ' + str(len(user_dict)) + '\n')
-    if (history_state + 1) * 10 < len(user_dict):
+async def get_history_srt(history_state: int) -> (str, int):
+    db_size = await db.get_size()
+    if db_size == 0:
+        return "Таблица пуста", history_state
+    res_text = ""
+    for raw in range(10 * history_state, min(10 * (history_state + 1), db_size)):
+        raw_data = await db.get_raw(raw + 1)
+        data = {
+            'name': raw_data[1],
+            'price': raw_data[2],
+            'payer': raw_data[3].split("', '"),
+            'buyer': raw_data[4],
+            'datetime': raw_data[5],
+            'status': raw_data[6].split("', '"),
+            'note': raw_data[7]}
+
+        res_text += f"{data['name']} - {data['price']}руб. - платят: {", ".join(data['payer'])} - нужно оплатить: {", ".join([item for m, item in zip(data['status'], data['payer']) if m])} - кому: {data['buyer']}\n"
+    res_text += ('С ' + str(10 * history_state + 1) + ' по ' + str(min(10 * (history_state + 1), db_size)) + ' записи из ' + str(db_size) + '\n')
+    if (history_state + 1) * 10 < db_size:
         history_state = history_state + 1
     else:
         history_state = 0
-    return (res_text, history_state)
+    return res_text, history_state
 
 
-def get_bill_str(name: str, user_dict: dict) -> str:
-    bill = []
-    for i in user_dict:
-        if name in user_dict[i]['payer'] and name != user_dict[i]['buyer'] and user_dict[i]['status'][user_dict[i]['payer'].index(name)] == 0:
-            bill.append((user_dict[i]['price'] / len(user_dict[i]['payer']), user_dict[i]['buyer']))
+async def get_bill_str(name: str):
+    bill = await db.get_bill(name)
     tmp_dict: dict[str, int] = {}
-    for i in bill:
-        if i[1] in tmp_dict:
-            tmp_dict[i[1]] += i[0]
+    for i in range(len(bill) - 1, -1, -1):
+        raw = bill[i]
+        tmp = [item for m, item in zip(raw[3].split(", "), [int(x) for x in raw[6].split(", ")]) if (m == 'pay')]
+        if tmp[0] == 0:
+            if raw[4] in tmp_dict:
+                tmp_dict[raw[4]] += raw[2]
+            else:
+                tmp_dict[raw[4]] = raw[2]
         else:
-            tmp_dict[i[1]] = i[0]
+            bill.pop(i)
     res_text = ''
     for i in tmp_dict:
         res_text += 'Долг перед ' + i + ' составляет ' + str(int(tmp_dict[i])) + '\n'
-    return res_text
+    return res_text, bill
 
 
-def compact_data(data: dict, buyer: str, date: datetime.date) -> dict:
-    tmp = data
-    tmp['buyer'] = buyer
-    tmp['datetime'] = date
-    tmp['status'] = [0] * len(tmp['payer'])
-    return tmp
+async def add_data(data: dict, buyer: str):
+    await db.add_purchase(data['name'], data['price'], ", ".join(data['payer']), buyer, ", ".join(['0'] * len(data['payer'])))
 
 
-def payment(user_dict: dict, name: str) -> dict:
-    for i in user_dict:
-        if name in user_dict[i]['payer']:
-            tmp = user_dict[i]
-            tmp['status'][tmp['payer'].index(name)] = 1
-            user_dict[i] = tmp
-    return user_dict
+async def payment(bill, name: str):
+    for raw in bill:
+        tmp = [str(val) if (m != name) else "1" for m, val in zip(raw[3].split(", "), [int(x) for x in raw[6].split(", ")])]
+        await db.make_payment(raw[0], f"\'{", ".join(tmp)}\'")
+
+        if tmp[0] == 0:
+            if raw[4] in tmp_dict:
+                tmp_dict[raw[4]] += raw[2]
+            else:
+                tmp_dict[raw[4]] = raw[2]

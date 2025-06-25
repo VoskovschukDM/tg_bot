@@ -1,9 +1,9 @@
 from aiogram import Bot, Dispatcher
-from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.filters.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import Message
 from config import Config, load_config
 import logging
 from logging import StreamHandler, Formatter
@@ -11,6 +11,7 @@ import sys
 import datetime
 import keyboards
 import body
+import db
 
 
 config: Config = load_config('bot.env')
@@ -19,15 +20,15 @@ BOT_TOKEN: str = config.tg_bot.token
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
+
 logging.basicConfig(filename='logs.txt', filemode='a', level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
 handler = StreamHandler(stream=sys.stdout)
 handler.setFormatter(Formatter(fmt='[%(asctime)s: %(levelname)s] %(message)s'))
 logger.addHandler(handler)
 
 # id, datetime, name, buyer, payers, price, status, other
-user_dict: dict[int, dict[str, str or int or list or datetime]] = {}
+#user_dict: dict[int, dict[str, str or int or list or datetime]] = {}
 users_db: dict[int, str] = {}
 
 class FSMFillForm(StatesGroup):
@@ -41,44 +42,14 @@ class FSMFillForm(StatesGroup):
     add_item_confirm = State()
 
 
-@dp.message(Command(commands='save_data_159260'))
-async def process_save_command(message: Message):
-    with open("data.csv", 'w', encoding="utf-8") as f:
-        for i in user_dict:
-            ans = str(i) + ';'
-            for j in user_dict[i]:
-                if j == 'history_state':
-                    continue
-                ans += str(user_dict[i][j]) + ';'
-            print(ans)
-            f.write(ans + '\n')
-
-
-@dp.message(Command(commands='load_data_159260'))
+@dp.message(Command(commands='init_db'))
 async def process_load_command(message: Message, state: FSMContext):
-    with open("data.csv", 'r', encoding="utf-8") as f:
-        text = f.readline()[:-1]
-        while text != '':
-            arr = text.split(';')
-            user_dict[int(arr[0])] = {}
-            user_dict[int(arr[0])]['name'] = arr[1]
-            user_dict[int(arr[0])]['price'] = int(arr[2])
-            user_dict[int(arr[0])]['payer'] = arr[3][2:-2].split("', '")
-            user_dict[int(arr[0])]['buyer'] = str(arr[4])
-            user_dict[int(arr[0])]['datetime'] = datetime.datetime.strptime(arr[5], '%Y-%m-%d').date()
-            #user_dict[int(arr[0])]['datetime'] = datetime.datetime.strptime(arr[5], '%d.%m.%Y').date()
-            tmp_arr = list()
-            for j in arr[6][1:-1].split(', '):
-                if j == '':
-                    break
-                tmp_arr.append(int(j))
-            user_dict[int(arr[0])]['status'] = tmp_arr
-            text = f.readline()[:-1]
+    await db.init_db()
 
 
 @dp.message(Command(commands='menu'))
 async def process_menu_command(message: Message, state: FSMContext):
-    if (message.from_user.id in users_db):
+    if message.from_user.id in users_db:
         logger.debug('user_bd_check successful')
         await message.answer(
             text='Меню',
@@ -94,7 +65,7 @@ async def process_menu_command(message: Message, state: FSMContext):
 
 @dp.message(Command(commands='start'))
 async def process_start_command(message: Message, state: FSMContext):
-    if (message.from_user.id in users_db):
+    if message.from_user.id in users_db:
         logger.debug('user_bd_check successful')
         await message.answer(
             text='Меню',
@@ -129,14 +100,14 @@ async def process_payer_command(message: Message, state: FSMContext):
 
 @dp.message(Command(commands='history'), StateFilter(default_state, FSMFillForm.history))
 async def process_history_command(message: Message, state: FSMContext):
-    if (message.from_user.id in users_db):
+    if message.from_user.id in users_db:
         logger.debug('user_bd_check successful')
         if await state.get_state() == 'FSMFillForm:history':
             tmp = await state.get_data()
             history_state = tmp['history_state']
         else:
             history_state = 0
-        res_text, history_state = body.get_history_srt(history_state, user_dict)
+        res_text, history_state = await body.get_history_srt(history_state)
         await state.update_data(history_state=history_state)
         if res_text == '':
             res_text = 'Нет истории'
@@ -156,9 +127,10 @@ async def process_history_command(message: Message, state: FSMContext):
 
 @dp.message(Command(commands='personal_bill'), StateFilter(default_state))
 async def process_history_command(message: Message, state: FSMContext):
-    if (message.from_user.id in users_db):
+    if message.from_user.id in users_db:
         logger.debug('user_bd_check successful')
-        res_text = body.get_bill_str(users_db[message.from_user.id], user_dict)
+        res_text, bill_data = await body.get_bill_str(users_db[message.from_user.id])
+        await state.update_data(bill=bill_data)
         logger.info(('getting personal bill - ' + users_db[message.from_user.id]))
         if res_text == '':
             await message.answer(
@@ -184,8 +156,7 @@ async def process_history_command(message: Message, state: FSMContext):
 @dp.message(Command(commands=['pay', 'menu']), StateFilter(FSMFillForm.pay_suggestion))
 async def process_history_command(message: Message, state: FSMContext):
     if message.text == '/pay':
-        global user_dict
-        user_dict = body.payment(user_dict, users_db[message.from_user.id])
+        await body.payment((await state.get_data())['bill'], users_db[message.from_user.id])
         logger.info(users_db[message.from_user.id] + ' payed')
         await message.answer(
             text='Оплачено\nМеню',
@@ -203,7 +174,7 @@ async def process_history_command(message: Message, state: FSMContext):
 
 @dp.message(Command(commands='add_item'), StateFilter(default_state))
 async def process_add_command(message: Message, state: FSMContext):
-    if (message.from_user.id in users_db):
+    if message.from_user.id in users_db:
         logger.debug('user_bd_check successful')
         await message.answer(
             text='Введите название покупки',
@@ -320,12 +291,12 @@ async def process_other_command(message: Message, state: FSMContext):
 
 @dp.message(Command(commands='ok'), StateFilter(FSMFillForm.add_item_confirm))
 async def process_ok_command(message: Message, state: FSMContext):
-    user_dict[len(user_dict)] = body.compact_data(await state.get_data(), users_db[message.from_user.id], message.date.date())
+    await body.add_data(await state.get_data(), users_db[message.from_user.id])
     await message.answer(
         text='Меню',
         reply_markup=keyboards.main_menu_kb
     )
-    logger.info('added item with number ' + str(len(user_dict)))
+    logger.info('added new item')
     logger.debug('entered menu state')
     await state.clear()
 
